@@ -1,0 +1,8 @@
+raw_data/
+analyzed_data/
+__pycache__/
+missed files/
+rna_out/
+rna_inputs/
+quant_2_archive/
+archived_scripts/
