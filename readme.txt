@@ -46,7 +46,39 @@ Currently, there are 3 important pieces of informaiton from the .asc file that a
         This barcode is then attached to the end of the output file to ensure that users are not analyzing the incorrect quant plate with this script.
     
     There are currently checks in this script to make sure that the user is selecting not only the correct method when analyzing, but also selects the correct quant plate so that sample quants can't get swapped.
-    
+
+Use:
+
+    ***************************IMPORTANT**********************************
+    The script will not currently run as is. The query_wlo_extraction_plate function requires a username and password input for AP. For this password, please reach out to Xavier Atache.
+    There is probably a way to have users that have access to WLO enter their own username and password, but I have not been able to get user accounts to work because it seems that they lack permissions.
+    So instead, I was using a username and password provided by Xavier.
+    ***********************************************************************
+
+    To use the script, just run the script you want (singlet or duplicate) and a UI should pop up.
+
+    The UI asks for several things:
+        Input File: This should be the path to the .asc file (output from tecan) that the user wants to analyze
+        Output File: THis is the path of the output file.
+
+            *Note- known bug: If the user just types the path into the box without the file suffix, the output file will not have a suffix. (example: .json)
+            If the user clicks the "browse" button, the .json suffix is automatically added.
+            Additionally, I have it exported currently as a .json for autopipeline and as a .csv so that the users can look at values
+                The .csv suffix for this is automatically added, and it makes weird .json.csv paths. Its just a bug I didn't have time to fix. Should be trivial to strip suffixes from filename variables and then tag on a .csv and .json to the respective exports.
+        Matrix Plate Barcode: THis is the barcode of the matrix plate that samples are being taken out of to quant. This barcode allows the WLO query to append tube barcodes to the samples so that the laboratory folk can easily find/veryify tubes/problems
+        Quant Plate Barcode: THis is the barcode of hte quant plate itself, with the quantifluor solution and diluted samples in it. The entry here should match the barcode on the .asc file. If not, the program will flag and error and will not analyze.
+        Sample type: The sample type that is being run. The difference in the sample type is twofold:
+            For DNA sample types:
+                The different DNA sample types have different expected dilution ratios:
+                    cfDNA 1:10
+                    FFPE DNA: 1:50
+                    gDNA (buffy): 1:100
+            For RNA samples:
+                The botom standard curve point is dropped (only 7 standards used for fitting): See confluence page above.
+                The RNA dilution factor is 1:25
+        
+    After the settings are correctly inputed, the program will fit the standards and show a standard curve for the user. If there are visual problems with the standards, the user can use this graph to try and find out what happened.
+    AFter this graph is closed, the output .json and .csv files will be output to the path the user indicated.
 
 
 
