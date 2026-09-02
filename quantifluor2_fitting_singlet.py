@@ -556,7 +556,7 @@ def interpolate_raw_data(data, sample_type:str):
 
     #Now we need to fill the NaN values with "null" so that it can be ingested by autopipeline
 
-
+    data_long=data_long.fillna("null")
 
     #creating a results dict to output results
 

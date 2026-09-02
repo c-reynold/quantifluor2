@@ -47,6 +47,8 @@ Currently, there are 3 important pieces of informaiton from the .asc file that a
     
     There are currently checks in this script to make sure that the user is selecting not only the correct method when analyzing, but also selects the correct quant plate so that sample quants can't get swapped.
 
+########QUICKSTART#################
+
 Use:
 
     ***************************IMPORTANT**********************************
@@ -79,6 +81,600 @@ Use:
         
     After the settings are correctly inputed, the program will fit the standards and show a standard curve for the user. If there are visual problems with the standards, the user can use this graph to try and find out what happened.
     AFter this graph is closed, the output .json and .csv files will be output to the path the user indicated.
+
+# Quantifluor 2 Quantification Program
+
+## Overview
+
+This program automates the processing of Quantifluor nucleic-acid quantification runs generated on a Tecan plate reader.
+
+The goal of the program is to take the raw fluorescence output from the instrument and convert it into a structured, traceable set of nucleic-acid concentration results that can be reviewed by a user or consumed by downstream laboratory software.
+
+The program performs several operations that would otherwise need to be done manually:
+
+1. Reads the raw Tecan `.asc` output file.
+2. Extracts plate and instrument metadata from the file.
+3. Associates quantification-plate wells with the corresponding wells on the source matrix plate.
+4. Queries Wet Lab Ops (WLO) to retrieve the tube barcode associated with each matrix-plate well.
+5. Identifies the Quantifluor standards and their known nucleic-acid masses.
+6. Calculates replicate statistics for the standards.
+7. Fits a weighted four-parameter logistic (4PL) standard curve.
+8. Uses the fitted curve to interpolate the nucleic-acid mass of unknown samples.
+9. Corrects the interpolated values for assay volume and process-specific dilution.
+10. Calculates standard-curve and control QC metrics.
+11. Performs basic process checks to prevent mismatched plate barcodes or assay methods.
+12. Exports the results as JSON and CSV files.
+
+The application also contains a Tkinter graphical interface so that the analysis can be run without directly interacting with the Python functions.
+
+---
+
+# Why This Program Exists
+
+Fluorescence-based nucleic-acid quantification requires more than simply reading the RFU value produced by the plate reader.
+
+The fluorescence signal must be interpreted relative to a set of standards containing known amounts of nucleic acid. The relationship between nucleic-acid mass and fluorescence is not assumed to be perfectly linear across the full measurement range, so this program models the standard curve using a four-parameter logistic function.
+
+In addition, laboratory quantification results need to retain sample identity and process context. A fluorescence value is not particularly useful by itself unless it can be associated with the correct sample tube, plate, assay method, and dilution scheme.
+
+This program therefore combines three types of information:
+
+* **Instrument data** from the Tecan `.asc` file
+* **Sample identity information** from Wet Lab Ops
+* **Quantitative analysis** from the fitted standard curve
+
+The result is a single analysis workflow that converts raw instrument output into sample-level concentration results with associated QC and metadata.
+
+---
+
+# General Workflow
+
+```text
+User selects Tecan .asc file
+        |
+        v
+Parse raw fluorescence data
+        |
+        v
+Extract plate and instrument metadata
+        |
+        v
+Validate plate barcode and Tecan method
+        |
+        v
+Query Wet Lab Ops using matrix plate barcode
+        |
+        v
+Map quant wells -> matrix wells -> tube barcodes
+        |
+        v
+Identify Quantifluor standards
+        |
+        v
+Calculate standard replicate mean, SD, and CV
+        |
+        v
+Fit weighted four-parameter logistic curve
+        |
+        v
+Interpolate sample RFU values
+        |
+        v
+Correct for dilution and assay volume
+        |
+        v
+Calculate QC metrics
+        |
+        v
+Export JSON and CSV results
+```
+
+---
+
+# Input Data
+
+## Tecan Quantification File
+
+The primary input is a `.asc` file produced by the Tecan plate reader.
+
+The first 96 rows of the file are interpreted as the 96 wells of the quantification plate and are read into a Pandas DataFrame containing:
+
+* `sample_id`
+* `well`
+* `raw_rfu`
+
+The program verifies that exactly 96 rows were recovered from the file.
+
+Some Tecan identifiers for controls do not follow the same naming convention as the other samples. These values are standardized during parsing. For example:
+
+```text
+PC1 -> PC1_1
+PC2 -> PC2_1
+BL1 -> BL1_1
+BL2 -> BL2_1
+```
+
+---
+
+# Metadata Extraction
+
+In addition to the well-level fluorescence data, the program reads the full `.asc` file as text and extracts run metadata using regular expressions.
+
+The extracted metadata includes:
+
+* Quantification plate barcode
+* Instrument serial number
+* Tecan workspace file
+* Optimal gain
+* Run date
+* Run time
+* Tecan Quantifluor method
+
+This information is useful both for traceability and for verifying that the uploaded file corresponds to the assay the user intends to analyze.
+
+---
+
+# Sample Identity and Wet Lab Ops Integration
+
+The Tecan output does not provide all of the sample identity information needed for downstream analysis.
+
+The program therefore queries Wet Lab Ops using the source matrix plate barcode.
+
+```python
+query_wlo_extraction_plate(barcode)
+```
+
+The WLO query returns the contents of the matrix plate, including the tube barcode occupying each well.
+
+The program constructs a mapping between:
+
+```text
+Quantification plate well
+        ->
+Original matrix plate well
+        ->
+Matrix tube barcode
+```
+
+The resulting tube barcode is added to the quantification DataFrame as:
+
+```text
+matrix_tube_barcode
+```
+
+This allows a measured RFU and calculated concentration to remain associated with the physical sample from which the measurement originated.
+
+---
+
+# Standard Curve
+
+## Standard Masses
+
+The Quantifluor plate contains standards with known quantities of nucleic acid.
+
+The DNA standard masses used by the program are:
+
+| Standard |           Mass |
+| -------- | -------------: |
+| A        |         200 ng |
+| B        |          50 ng |
+| C        |        12.5 ng |
+| D        |       3.125 ng |
+| E        |     0.78125 ng |
+| F        |   0.1953125 ng |
+| G        | 0.048828125 ng |
+| H        |           0 ng |
+
+Two replicates are measured for each standard.
+
+For FFPE RNA, the G standard is excluded from the curve because the low-concentration standard is not sufficiently distinguishable from the blank in the current assay configuration.
+
+---
+
+# Standard Replicate Statistics
+
+Before fitting the calibration curve, replicate measurements for each standard concentration are grouped together.
+
+For each standard, the program calculates:
+
+* Mean RFU
+* Standard deviation of RFU
+* Percent coefficient of variation (%CV)
+
+The mean RFU of the replicate pair is used as the fluorescence value for curve fitting.
+
+The replicate statistics are also retained in the output to support troubleshooting and QC review.
+
+---
+
+# Four-Parameter Logistic Model
+
+The standard curve is modeled using a four-parameter logistic, or 4PL, function:
+
+```text
+                    top - bottom
+y = bottom + ------------------------------
+               1 + (x / EC50)^(-Hill)
+```
+
+where:
+
+* `x` = nucleic-acid mass
+* `y` = predicted fluorescence
+* `bottom` = lower asymptote
+* `top` = upper asymptote
+* `EC50` = mass corresponding approximately to the midpoint of the response range
+* `hill_slope` = steepness of the response curve
+
+The implementation is:
+
+```python
+bottom + (top - bottom) / (1 + (x / ec50) ** (-hill_slope))
+```
+
+The fitted parameters are retained as part of the run output.
+
+---
+
+# Weighted Curve Fitting
+
+The standard curve is fit using `scipy.optimize.curve_fit`.
+
+A `1/y^2` weighting scheme is used.
+
+`curve_fit` minimizes:
+
+```text
+sum(((observed - predicted) / sigma)^2)
+```
+
+The program therefore sets:
+
+```text
+sigma = |y|
+```
+
+which produces an effective weighting proportional to:
+
+```text
+1 / y^2
+```
+
+The purpose of this weighting is to prevent the high-RFU standards from dominating the fit simply because their absolute residuals are numerically much larger than those of the low-RFU standards.
+
+Because a zero or extremely small `sigma` would produce an excessively large weight, a small lower limit is applied to the sigma values.
+
+The fitting function returns:
+
+* Optimized 4PL parameters
+* Parameter covariance matrix
+* Estimated parameter errors
+* Predicted RFUs
+* Residuals
+* Weighted residuals
+* Sigma values used during fitting
+
+---
+
+# Standard-Curve Visualization
+
+After fitting, the program generates a figure containing:
+
+1. The observed standard measurements and fitted 4PL curve
+2. The weighted residuals for the standards
+
+The standard-curve plot uses logarithmic x and y axes. The residual plot uses a logarithmic x-axis.
+
+The plot provides a visual method of evaluating whether:
+
+* the standards follow the expected response,
+* the fitted curve adequately describes the data, and
+* individual standards show unusually large deviations from the model.
+
+---
+
+# Interpolation of Unknown Samples
+
+Once the 4PL parameters have been determined, the equation is algebraically inverted to estimate nucleic-acid mass from an observed RFU.
+
+The inverse relationship used by the program is:
+
+```text
+                              1 / Hill
+             y - bottom
+x = EC50 * (-------------)
+               top - y
+```
+
+The implementation is:
+
+```python
+conc = ec50 * ((y-bottom)/(top-y)) ** (1/hill_slope)
+```
+
+This calculation converts:
+
+```text
+Measured RFU
+    ->
+Interpolated nucleic-acid mass in the quantification well
+```
+
+Values outside the fitted range are handled separately rather than blindly extrapolated.
+
+---
+
+# Dilution Correction
+
+The interpolated value represents the amount of nucleic acid present in the Quantifluor measurement well, not the concentration of the original sample.
+
+The program therefore applies process-specific dilution corrections.
+
+Current dilution factors are:
+
+| Sample Type | Dilution Correction |
+| ----------- | ------------------: |
+| FFPE DNA    |                  50 |
+| FFPE RNA    |                  25 |
+| cfDNA       |                   5 |
+| gDNA        |                 100 |
+
+The final concentration is calculated as:
+
+```python
+(interpolated_mass / 10) * dilution_factor
+```
+
+The division by 10 converts the interpolated mass to the concentration of the diluted sample because 10 µL of diluted sample was transferred into the Quantifluor assay.
+
+The appropriate dilution correction is then applied to estimate the concentration of the original sample.
+
+The resulting value is reported as:
+
+```text
+final_concentration (ng/ul)
+```
+
+---
+
+# Reportability Checks
+
+The program evaluates whether a calculated sample concentration can be reported.
+
+Samples may be flagged when:
+
+* the interpolated mass cannot be calculated,
+* the fluorescence measurement is outside the fitted response range, or
+* another invalid value prevents calculation of the final concentration.
+
+Samples without an identified problem are assigned:
+
+```text
+reportable
+```
+
+This prevents invalid measurements from being treated as ordinary quantitative results.
+
+---
+
+# Batch-Level Quality Control
+
+Several QC values are calculated for each quantification run.
+
+## Positive Control Concentration
+
+The calculated concentration of the designated control is extracted from the plate.
+
+## Maximum Standard CV
+
+The replicate %CV values are calculated for all standards, and the largest observed value is reported as:
+
+```text
+standard_max_cv
+```
+
+This provides a summary measure of the worst replicate agreement in the standard series.
+
+## Maximum Standard Residual
+
+The fitted standard curve is also used to back-calculate the mass of each standard.
+
+The percent residual is calculated as:
+
+```text
+Interpolated Mass - Expected Mass
+--------------------------------- x 100
+          Expected Mass
+```
+
+The largest absolute residual is reported as:
+
+```text
+standard_max_residual
+```
+
+This provides a measure of how well the fitted calibration model reproduces the known standard concentrations.
+
+---
+
+# Process Validation
+
+Before performing the final analysis, the program checks that the user's inputs agree with information contained in the Tecan file.
+
+## Quantification Plate Barcode
+
+The plate barcode entered by the user must match the plate barcode recorded in the uploaded `.asc` file.
+
+If the two barcodes do not match, analysis stops.
+
+This protects against accidentally analyzing a file from a different quantification plate.
+
+## Quantifluor Method
+
+The Tecan method embedded in the output file is mapped to an expected sample type:
+
+```text
+Quantifluor 2 DNA.mth   -> ffpe_dna
+Quantifluor 2 RNA.mth   -> ffpe_rna
+Quantifluor 2 cfDNA.mth -> cfdna
+Quantifluor 2 gDNA.mth  -> gdna
+```
+
+The sample type selected by the user must agree with the method that generated the Tecan file.
+
+This prevents the program from applying an incorrect standard configuration or dilution correction to the data.
+
+---
+
+# Output
+
+The program generates two output formats.
+
+## JSON
+
+The JSON output is intended to provide structured data for downstream software.
+
+It contains run-level information including:
+
+```text
+bottom_fit
+top_fit
+ec50_fit
+hill_slope_fit
+control_concentration
+standard_max_cv
+standard_max_residual
+quant_data
+```
+
+The `quant_data` section contains the processed well-level quantification information.
+
+## CSV
+
+A CSV representation of the processed plate DataFrame is also generated.
+
+The CSV is useful for:
+
+* manual review,
+* troubleshooting,
+* development,
+* opening results in Excel or similar software.
+
+Both files are generated by the main workflow.
+
+---
+
+# Graphical User Interface
+
+The program includes a Tkinter GUI to make the workflow accessible without requiring users to interact directly with Python.
+
+The interface requests:
+
+* Input `.asc` file
+* Output file location
+* Matrix plate barcode
+* Quantification plate barcode
+* Sample type
+
+The available sample types are:
+
+```text
+ffpe_dna
+ffpe_rna
+cfdna
+gdna
+```
+
+The user then selects:
+
+```text
+Run Quantification
+```
+
+The GUI validates required fields before running the analysis.
+
+If the analysis succeeds, the status is changed to `Complete` and the user is informed where the results were saved.
+
+If an exception occurs, the status is changed to `Failed` and the error message is displayed to the user.
+
+---
+
+# Major Program Components
+
+The major functions in the program are:
+
+### `query_wlo_extraction_plate()`
+
+Queries Wet Lab Ops for the contents of a matrix plate.
+
+### `_build_sigma_y2()`
+
+Constructs the sigma values required to implement `1/y^2` weighted nonlinear regression.
+
+### `four_param_logistic()`
+
+Defines the four-parameter logistic calibration model.
+
+### `four_pl_weighted_curve_fit()`
+
+Fits the Quantifluor standard curve and calculates residuals and parameter uncertainty.
+
+### `_plot_fit_and_residuals()`
+
+Plots the fitted standard curve and weighted residuals.
+
+### `parse_quant_file()`
+
+Parses the Tecan `.asc` file, extracts metadata, maps plate positions, and retrieves tube barcodes from WLO.
+
+### `four_pl_interpolate_concentration()`
+
+Inverts the fitted 4PL equation to estimate nucleic-acid mass from fluorescence.
+
+### `determine_concentration_status()`
+
+Determines whether an individual sample concentration is reportable.
+
+### `interpolate_raw_data()`
+
+Performs the primary quantitative analysis, including standard processing, curve fitting, interpolation, dilution correction, and QC calculation.
+
+### `run_quant_program()`
+
+Coordinates the complete workflow and writes the output files.
+
+### `submit()`
+
+Receives input from the graphical interface, validates required fields, runs the analysis, and reports success or failure to the user.
+
+---
+
+# Summary
+
+The Quantifluor 2 Quantification Program converts raw plate-reader fluorescence measurements into traceable nucleic-acid concentration results.
+
+Rather than treating quantification as an isolated mathematical calculation, the program combines:
+
+```text
+Instrument output
+       +
+Sample identity
+       +
+Calibration modeling
+       +
+Dilution correction
+       +
+Quality control
+       +
+Process validation
+       =
+Structured quantification results
+```
+
+The purpose of the application is to reduce manual data manipulation, preserve sample identity, standardize quantification calculations, detect common process errors, and generate data in a format suitable for both human review and downstream automated processing.
+
+
+
 
 
 
